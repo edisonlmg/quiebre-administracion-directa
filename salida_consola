@@ -1,0 +1,267 @@
+> # ---- Parámetros --------------------------------------------------------------
+> ruta_datos <- "data/raw/DataSet-Obras-Publicas 15-06-2026.xlsx"  # ajusta la ruta si hace falta
+> fecha_vigencia <- as.Date("2024-06-01")  # entrada en vigor de la directiva
+> inicio_periodo <- as.Date("2015-01-01")
+> fin_periodo    <- as.Date("2026-05-31")   # excluye junio 2026 (incompleto)
+> modalidad_objetivo <- "Administración directa"
+> # Sistema de diseño
+> col_teal  <- "#2D6A5E"  # serie observada
+> col_azul  <- "#1F3D6B"  # ajuste / segmentos
+> col_crema <- "#F5F0EB"  # fondo
+> col_marca <- "#B0413E"  # líneas de referencia
+> fuente    <- "Montserrat"
+> # ---- 1. Lectura y limpieza ---------------------------------------------------
+> # El encabezado real está en la fila 4 (3 filas de metadatos arriba): skip = 3.
+> crudo <- read_excel(ruta_datos, sheet = "Sheet1", skip = 3,
++                     col_types = "text")  # leemos como texto y parseamos a mano
+New names:
+• `RUC` -> `RUC...44`
+• `Monto del contrato en soles` -> `Monto del contrato en soles...46`
+• `RUC` -> `RUC...47`
+• `Monto del contrato en soles` -> `Monto del contrato en soles...49`
+• `Tipo de documento de identidad` -> `Tipo de documento de identidad...50`
+• `Número de documento` -> `Número de documento...51`
+• `Nombres Apellidos` -> `Nombres Apellidos...52`
+• `Colegiatura` -> `Colegiatura...53`
+• `Número de colegiatura` -> `Número de colegiatura...54`
+• `Tipo de documento de identidad` -> `Tipo de documento de identidad...57`
+• `Número de documento` -> `Número de documento...58`
+• `Nombres Apellidos` -> `Nombres Apellidos...59`
+• `Colegiatura` -> `Colegiatura...60`
+• `Número de colegiatura` -> `Número de colegiatura...61`
+> View(crudo)
+> obras <- crudo |>
++   transmute(
++     cod_infobras = `Código INFOBRAS`,
++     modalidad    = `Modalidad de ejecución de la obra`,
++     fecha_inicio = dmy(`Fecha de inicio de obra`)  # formato dd/mm/yyyy
++   ) |>
++   filter(!is.na(fecha_inicio),
++          fecha_inicio >= inicio_periodo,
++          fecha_inicio <= fin_periodo)
+> # Diagnóstico de cobertura (las obras sin fecha de inicio quedan fuera de la serie)
+> message(sprintf("Obras con fecha de inicio en el período: %s de %s registros.",
++                 format(nrow(obras), big.mark = ","),
++                 format(nrow(crudo),  big.mark = ",")))
+Obras con fecha de inicio en el período: 117,339 de 191,180 registros.
+> # ---- 2. Serie mensual --------------------------------------------------------
+> # prop_ad = (obras AD iniciadas en el mes) / (todas las obras iniciadas en el mes)
+> serie <- obras |>
++   mutate(
++     mes = floor_date(fecha_inicio, "month"),
++     es_ad = as.integer(modalidad == modalidad_objetivo)
++   ) |>
++   summarise(total = n(), ad = sum(es_ad), .by = mes) |>
++   arrange(mes) |>
++   complete(mes = seq(min(mes), max(mes), by = "month"),
++            fill = list(total = 0, ad = 0)) |>
++   mutate(
++     prop_ad = if_else(total > 0, ad / total, NA_real_),
++     t = row_number(),                                   # índice de tiempo
++     post = as.integer(mes >= fecha_vigencia),           # 1 desde la vigencia
++     t_post = post * (t - min(t[mes >= fecha_vigencia]) + 1)  # tiempo transcurrido tras la vigencia
++   )
+> # ---- 3. Gráfico exploratorio de la serie ------------------------------------
+> g_serie <- serie |>
++   tidyplot(x = mes, y = prop_ad) |>
++   add_line(color = col_teal, linewidth = 0.9) |>
++   add_data_points(color = col_teal, size = 1.2) |>
++   add_reference_lines(x = fecha_vigencia, color = col_marca) |>
++   add_title("Proporción mensual de obras por administración directa") |>
++   adjust_x_axis_title("Mes de inicio de obra") |>
++   adjust_y_axis_title("Proporción AD") |>
++   adjust_font(family = fuente, fontsize = 11) |>
++   adjust_size(width = 160, height = 90)
+> # ---- 4. Quiebre endógeno: strucchange (Bai-Perron) ---------------------------
+> # Serie temporal mensual (frecuencia 12). Modelo de cambio de MEDIA (~ 1).
+> y_ts <- ts(serie$prop_ad, start = c(year(min(serie$mes)),
++                                     month(min(serie$mes))), frequency = 12)
+> # 4a. Test de estabilidad (supF de Andrews) y fecha de quiebre única
+> fs <- Fstats(y_ts ~ 1)
+> sctest(fs)                 # H0: sin quiebre
+
+	supF test
+
+data:  fs
+sup.F = 10.099, p-value = 0.0256
+
+> fecha_supF <- index(fs$Fstats)[which.max(fs$Fstats)]  # punto de máximo F
+> # 4b. Número óptimo de quiebres por BIC (Bai-Perron, hasta 5, trim 15%)
+> bp <- breakpoints(y_ts ~ 1, h = 0.15, breaks = 5)
+> print(summary(bp))         # tabla de RSS / BIC por nº de quiebres
+
+	 Optimal (m+1)-segment partition: 
+
+Call:
+breakpoints.formula(formula = y_ts ~ 1, h = 0.15, breaks = 5)
+
+Breakpoints at observation number:
+                        
+m = 1            103    
+m = 2      50 70        
+m = 3   21 50 70        
+m = 4   21 50 70 103    
+m = 5   21 50 70 93  113
+
+Corresponding to breakdates:
+                                                
+m = 1                            2023(7)        
+m = 2           2019(2) 2020(10)                
+m = 3   2016(9) 2019(2) 2020(10)                
+m = 4   2016(9) 2019(2) 2020(10) 2023(7)        
+m = 5   2016(9) 2019(2) 2020(10) 2022(9) 2024(5)
+
+Fit:
+                                                         
+m   0        1        2        3        4        5       
+RSS    1.974    1.836    1.756    1.593    1.518    1.522
+BIC -182.265 -182.309 -178.597 -182.093 -178.859 -168.689
+> plot(bp)                   # BIC vs nº de quiebres
+> fechas_quiebre <- breakdates(bp)            # fecha(s) óptima(s)
+> ic_quiebre     <- confint(bp)               # intervalos de confianza
+> print(fechas_quiebre); print(ic_quiebre)
+[1] 2023.5
+
+	 Confidence intervals for breakpoints
+	 of optimal 2-segment partition: 
+
+Call:
+confint.breakpointsfull(object = bp)
+
+Breakpoints at observation number:
+  2.5 % breakpoints 97.5 %
+1    86         103    135
+
+Corresponding to breakdates:
+  2.5 %   breakpoints 97.5 % 
+1 2022(2) 2023(7)     2026(3)
+> # ---- 5. Series de tiempo interrumpidas (ITS), anclado en la vigencia ---------
+> # prop_ad = b0 + b1*t + b2*post + b3*t_post + e
+> #   b2 = salto de nivel en la vigencia ; b3 = cambio de pendiente tras la vigencia
+> its <- lm(prop_ad ~ t + post + t_post, data = serie)
+> # Errores HAC (Newey-West) por autocorrelación de la serie
+> its_hac <- coeftest(its, vcov = NeweyWest(its, lag = 6, prewhite = FALSE))
+> print(its_hac)
+
+t test of coefficients:
+
+               Estimate  Std. Error t value  Pr(>|t|)    
+(Intercept)  0.46448675  0.02943943 15.7777 < 2.2e-16 ***
+t           -0.00024142  0.00041399 -0.5832    0.5608    
+post        -0.18630279  0.03099489 -6.0108 1.670e-08 ***
+t_post       0.01043517  0.00160870  6.4867 1.587e-09 ***
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+> # Versión ponderada por nº de obras del mes (atenúa meses de bajo N)
+> its_w <- lm(prop_ad ~ t + post + t_post, data = serie, weights = total)
+> print(coeftest(its_w, vcov = NeweyWest(its_w, lag = 6, prewhite = FALSE)))
+
+t test of coefficients:
+
+               Estimate  Std. Error t value  Pr(>|t|)    
+(Intercept)  4.5090e-01  2.9542e-02 15.2632 < 2.2e-16 ***
+t           -7.9107e-05  3.8451e-04 -0.2057    0.8373    
+post        -1.7326e-01  2.4020e-02 -7.2131 3.729e-11 ***
+t_post       8.3180e-03  1.0274e-03  8.0961 3.175e-13 ***
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+> # Valores ajustados para graficar el ajuste segmentado
+> serie <- serie |> mutate(ajuste_its = predict(its, newdata = serie))
+> # ---- 6. Robustez bayesiana ---------------------------------------------------
+> # 6a. bcp: probabilidad posterior de quiebre en cada mes (sin dependencias)
+> set.seed(2026)
+> b <- bcp(as.numeric(na.omit(serie$prop_ad)))
+> serie_bcp <- serie |>
++   filter(!is.na(prop_ad)) |>
++   mutate(prob_quiebre = b$posterior.prob)
+> mes_bcp <- serie_bcp$mes[which.max(serie_bcp$prob_quiebre)]
+> message("bcp - mes con mayor probabilidad posterior de quiebre: ", mes_bcp)
+bcp - mes con mayor probabilidad posterior de quiebre: 2023-02-01
+> # ---- 7. Gráfico final: serie + ajuste ITS + marcas de quiebre ---------------
+> serie_largo <- serie |>
++   select(mes, Observado = prop_ad, `Ajuste ITS` = ajuste_its) |>
++   pivot_longer(-mes, names_to = "serie", values_to = "valor")
+> g_final <- serie_largo |>
++   tidyplot(x = mes, y = valor, color = serie) |>
++   add_line(linewidth = 0.9) |>
++   add_reference_lines(x = fecha_vigencia, color = col_marca) |>
++   add_reference_lines(x = as.Date(fechas_quiebre[1]), color = col_azul) |>
++   adjust_colors(c("Observado" = col_teal, "Ajuste ITS" = col_azul)) |>
++   add_title("Quiebre estructural en la modalidad de administración directa") |>
++   adjust_x_axis_title("Mes de inicio de obra") |>
++   adjust_y_axis_title("Proporción AD") |>
++   adjust_font(family = fuente, fontsize = 11) |>
++   adjust_size(width = 160, height = 90)
+> # Probabilidad posterior de quiebre (bcp)
+> g_bcp <- serie_bcp |>
++   tidyplot(x = mes, y = prob_quiebre) |>
++   add_line(color = col_azul, linewidth = 0.8) |>
++   add_reference_lines(x = fecha_vigencia, color = col_marca) |>
++   add_title("Probabilidad posterior de quiebre (bcp)") |>
++   adjust_x_axis_title("Mes") |>
++   adjust_y_axis_title("Prob. posterior") |>
++   adjust_font(family = fuente, fontsize = 11) |>
++   adjust_size(width = 160, height = 70)
+> # ---- 8. Exportar resultados --------------------------------------------------
+> save_plot(g_serie, "fig1_serie_prop_ad.png", dpi = 300)
+✔ save_plot: saved to fig1_serie_prop_ad.png
+Avisos:
+1: In grid.Call(C_stringMetric, as.graphicsAnnot(x$label)) :
+  font family not found in Windows font database
+2: In grid.Call(C_textBounds, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+3: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+4: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+> save_plot(g_final, "fig2_quiebre_its.png",   dpi = 300)
+✔ save_plot: saved to fig2_quiebre_its.png
+Avisos:
+1: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+2: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+3: In grid.Call(C_textBounds, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+4: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+5: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+6: In grid.Call(C_textBounds, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+7: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+8: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+> save_plot(g_bcp,   "fig3_bcp.png",           dpi = 300)
+✔ save_plot: saved to fig3_bcp.png
+Hubo 11 avisos (use warnings() para verlos)
+> # Tabla resumen de hallazgos
+> resumen <- tibble(
++   metodo = c("supF (máximo)", "Bai-Perron (BIC)", "bcp (post. máx.)", "ITS vigencia"),
++   fecha  = c(as.character(fecha_supF),
++              paste(format(as.Date(fechas_quiebre), "%Y-%m"), collapse = "; "),
++              as.character(mes_bcp),
++              as.character(fecha_vigencia))
++ )
+> print(resumen)
+# A tibble: 4 × 2
+  metodo           fecha     
+  <chr>            <chr>     
+1 supF (máximo)    2023.5    
+2 Bai-Perron (BIC) 1975-07   
+3 bcp (post. máx.) 2023-02-01
+4 ITS vigencia     2024-06-01
+Avisos:
+1: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+2: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+3: In grid.Call(C_textBounds, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+4: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
+5: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  font family not found in Windows font database
